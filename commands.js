@@ -3,7 +3,9 @@
  * Schaltfläche "Widerspruch" in einer geöffneten Werbemail:
  *  - prüft, ob es Spam ist (dann keine Antwort, sonst wird die Adresse bestätigt)
  *  - sucht eine erreichbare Adresse (Reply-To, Absender, Datenschutz/Impressum, info@)
- *  - öffnet einen fertigen Widerspruch als Entwurf, du musst nur noch senden
+ *  - sendet den Widerspruch, verschiebt alle Mails des Absenders nach "Werbung"
+ *    und legt eine Regel an, die künftige Mails des Absenders gleich dorthin schiebt
+ *  - ohne Microsoft-Graph-Anmeldung (clientId leer): öffnet nur den Entwurf
  */
 
 // ===================== EINSTELLUNGEN =====================
@@ -20,6 +22,15 @@ const EINSTELLUNGEN = {
   fallbackInfo: true,
   abmeldeAdresseInCc: true,
   kategorie: "Widerspruch versandt",
+
+  // --- Microsoft Graph (App-Anmeldung, siehe Anleitung). Leer = nur Entwurf öffnen ---
+  clientId: "33b78f44-4e96-4741-870b-838fd42e728c",          // Anwendungs-ID (Client) der App-Anmeldung
+  // "common" = jedes Postfach: private Microsoft-Konten und alle Firmen-Umgebungen
+  authority: "https://login.microsoftonline.com/common",
+  sofortSenden: true,    // false = Entwurf öffnen statt senden, Aufräumen läuft trotzdem
+  aufraeumen: true,      // alle Mails des Absenders aus dem Posteingang verschieben
+  regelAnlegen: true,    // Regel: künftige Mails des Absenders automatisch verschieben
+  zielOrdner: "Werbung",
 };
 // =========================================================
 
@@ -163,64 +174,186 @@ function melden(text, fehler) {
   item.notificationMessages.replaceAsync("widerspruch", msg);
 }
 
+// ---------- Microsoft Graph ----------
+const SCOPES = ["Mail.ReadWrite", "Mail.Send", "MailboxSettings.ReadWrite"];
+let msalApp = null;
+
+function graphAktiv() {
+  return !!(EINSTELLUNGEN.clientId && window.msal && Office.context.requirements.isSetSupported("NestedAppAuth", "1.1"));
+}
+
+async function token() {
+  if (!msalApp) {
+    msalApp = await msal.createNestablePublicClientApplication({
+      auth: {
+        clientId: EINSTELLUNGEN.clientId,
+        authority: EINSTELLUNGEN.authority,
+      },
+    });
+  }
+  try {
+    return (await msalApp.acquireTokenSilent({ scopes: SCOPES })).accessToken;
+  } catch (e) {
+    return (await msalApp.acquireTokenPopup({ scopes: SCOPES })).accessToken;
+  }
+}
+
+async function graph(methode, pfad, daten) {
+  const url = pfad.startsWith("https://") ? pfad : "https://graph.microsoft.com/v1.0" + pfad;
+  const r = await fetch(url, {
+    method: methode,
+    headers: { Authorization: "Bearer " + (await token()), "Content-Type": "application/json" },
+    body: daten ? JSON.stringify(daten) : undefined,
+  });
+  if (!r.ok) throw new Error(`Graph ${r.status}: ${(await r.text()).slice(0, 120)}`);
+  return r.status === 202 || r.status === 204 ? null : r.json();
+}
+
+function odataText(s) {
+  return encodeURIComponent(s.replace(/'/g, "''"));
+}
+
+async function zielOrdnerId() {
+  const name = odataText(EINSTELLUNGEN.zielOrdner);
+  for (const pfad of [`/me/mailFolders/inbox/childFolders?$filter=displayName eq '${name}'`,
+                      `/me/mailFolders?$filter=displayName eq '${name}'`]) {
+    const r = await graph("GET", pfad);
+    if (r.value.length) return r.value[0].id;
+  }
+  return (await graph("POST", "/me/mailFolders/inbox/childFolders", { displayName: EINSTELLUNGEN.zielOrdner })).id;
+}
+
+async function regelAnlegen(absender, ordnerId) {
+  const titel = "Widerspruch: " + absender;
+  const r = await graph("GET", "/me/mailFolders/inbox/messageRules");
+  if (r.value.some((x) => x.displayName === titel)) return false;
+  await graph("POST", "/me/mailFolders/inbox/messageRules", {
+    displayName: titel,
+    sequence: 1,
+    isEnabled: true,
+    conditions: { senderContains: [absender] },
+    actions: { moveToFolder: ordnerId, stopProcessingRules: true },
+  });
+  return true;
+}
+
+async function posteingangAufraeumen(absender, ordnerId, ausser) {
+  let n = 0;
+  let url = `/me/mailFolders/inbox/messages?$filter=from/emailAddress/address eq '${odataText(absender)}'&$select=id&$top=100`;
+  while (url && n < 1000) {
+    const r = await graph("GET", url);
+    for (const m of r.value) {
+      if (m.id === ausser) continue;
+      await graph("POST", `/me/messages/${m.id}/move`, { destinationId: ordnerId });
+      n++;
+    }
+    url = r["@odata.nextLink"];
+  }
+  return n;
+}
+
 // ---------- Hauptablauf ----------
-async function pruefenUndErstellen() {
+// Ergebnis: { fehler } bei Abbruch, sonst { text } mit Zusammenfassung
+async function ausfuehren() {
   const item = Office.context.mailbox.item;
   const meine0 = Office.context.mailbox.userProfile.emailAddress.toLowerCase();
   const absender = (item.from && item.from.emailAddress || "").toLowerCase();
-  if (!absender.includes("@")) return "Keine Absenderadresse gefunden.";
-  if (basisDomain(absender) === basisDomain(meine0)) return "Interner Absender, kein Widerspruch.";
+  if (!absender.includes("@")) return { fehler: "Keine Absenderadresse gefunden." };
+  if (basisDomain(absender) === basisDomain(meine0)) return { fehler: "Interner Absender, kein Widerspruch." };
 
   const k = kopfZerlegen(await asyncCall((cb) => item.getAllInternetHeadersAsync(cb)));
   const scl = spamWert(k);
-  if (scl >= EINSTELLUNGEN.spamAbScl) return `Sieht nach Spam aus (SCL ${scl}). Keine Antwort, sonst ist deine Adresse bestätigt. Einfach löschen.`;
-  if (EINSTELLUNGEN.nurMitAbmeldeKopf && !k["list-unsubscribe"]) return "Kein Abmelde-Kopf, vermutlich Spam. Keine Antwort, einfach löschen.";
+  if (scl >= EINSTELLUNGEN.spamAbScl) return { fehler: `Sieht nach Spam aus (SCL ${scl}). Keine Antwort, sonst ist deine Adresse bestätigt. Einfach löschen.` };
+  if (EINSTELLUNGEN.nurMitAbmeldeKopf && !k["list-unsubscribe"]) return { fehler: "Kein Abmelde-Kopf, vermutlich Spam. Keine Antwort, einfach löschen." };
 
+  let mitGraph = graphAktiv();
   const log = protokollLesen();
   const frueher = log[absender] ? new Date(log[absender]) : null;
-  if (frueher && (Date.now() - frueher.getTime()) / 864e5 < EINSTELLUNGEN.erneutNachTagen) {
-    return `Diesem Absender hast du schon am ${datum(frueher)} widersprochen.`;
+  const gesperrt = frueher && (Date.now() - frueher.getTime()) / 864e5 < EINSTELLUNGEN.erneutNachTagen;
+  if (gesperrt && !mitGraph) return { fehler: `Diesem Absender hast du schon am ${datum(frueher)} widersprochen.` };
+
+  const teile = [];
+  if (!gesperrt) {
+    // Eigene Adresse, an die die Werbung ging (Plus-Adresse aus dem Kopf bevorzugt)
+    const kopfEmpf = adressenImText([k["delivered-to"], k["x-original-to"], k["to"]].join(" "));
+    const meine = kopfEmpf.find((a) => a.includes("+"))
+      || (item.to || []).map((r) => r.emailAddress.toLowerCase()).find((a) => basisDomain(a) === basisDomain(meine0))
+      || meine0;
+
+    const text = (await asyncCall((cb) => item.body.getAsync(Office.CoercionType.Text, cb))) + " " +
+                 (await asyncCall((cb) => item.body.getAsync(Office.CoercionType.Html, cb)));
+    const ds = besteAdresseAusMail(text, absender, meine);
+    const replyTo = adressenImText(k["reply-to"]).find((a) => !istNoReply(a)) || "";
+    let an = replyTo || (!istNoReply(absender) ? absender : "") || ds;
+    if (!an && EINSTELLUNGEN.fallbackInfo) an = "info@" + basisDomain(absender);
+    if (!an) return { fehler: "Keine erreichbare Adresse gefunden." };
+
+    const cc = [];
+    if (ds && ds !== an) cc.push(ds);
+    const abm = EINSTELLUNGEN.abmeldeAdresseInCc ? abmeldeAdresse(k["list-unsubscribe"]) : "";
+    if (abm && abm !== an && abm !== ds) cc.push(abm);
+
+    const name = EINSTELLUNGEN.meinName || Office.context.mailbox.userProfile.displayName;
+    const betreff = frueher
+      ? "Erneuter Widerspruch und letzte Aufforderung zur Unterlassung von Werbe-E-Mails"
+      : "Widerspruch gegen Werbe-E-Mails und Aufforderung zur Unterlassung";
+    const html = brieftext(item, meine, frueher, name);
+
+    let gesendet = false;
+    if (mitGraph && EINSTELLUNGEN.sofortSenden) {
+      try {
+        await graph("POST", "/me/sendMail", {
+        message: {
+          subject: betreff,
+          body: { contentType: "HTML", content: html },
+          toRecipients: [an].map((a) => ({ emailAddress: { address: a } })),
+          ccRecipients: cc.map((a) => ({ emailAddress: { address: a } })),
+        },
+        saveToSentItems: true,
+        });
+        gesendet = true;
+        teile.push(`Widerspruch an ${an} gesendet`);
+      } catch (e) {
+        // z.B. Firmenpostfach ohne Zustimmung des Admins: dann wie bisher als Entwurf
+        console.log("Graph nicht verfügbar:", e);
+        mitGraph = false;
+      }
+    }
+    if (!gesendet) {
+      Office.context.mailbox.displayNewMessageForm({ toRecipients: [an], ccRecipients: cc, subject: betreff, htmlBody: html });
+      teile.push("Widerspruch als Entwurf geöffnet");
+    }
+    await protokollSchreiben(absender);
+    await kategorieSetzen(item);
+  } else {
+    teile.push(`Widerspruch schon am ${datum(frueher)} gesendet`);
   }
 
-  // Eigene Adresse, an die die Werbung ging (Plus-Adresse aus dem Kopf bevorzugt)
-  const kopfEmpf = adressenImText([k["delivered-to"], k["x-original-to"], k["to"]].join(" "));
-  const meine = kopfEmpf.find((a) => a.includes("+"))
-    || (item.to || []).map((r) => r.emailAddress.toLowerCase()).find((a) => basisDomain(a) === basisDomain(meine0))
-    || meine0;
+  if (!mitGraph) return { text: teile[0] + ". Bitte prüfen und senden." };
 
-  const text = (await asyncCall((cb) => item.body.getAsync(Office.CoercionType.Text, cb))) + " " +
-               (await asyncCall((cb) => item.body.getAsync(Office.CoercionType.Html, cb)));
-  const ds = besteAdresseAusMail(text, absender, meine);
-  const replyTo = adressenImText(k["reply-to"]).find((a) => !istNoReply(a)) || "";
-  let an = replyTo || (!istNoReply(absender) ? absender : "") || ds;
-  if (!an && EINSTELLUNGEN.fallbackInfo) an = "info@" + basisDomain(absender);
-  if (!an) return "Keine erreichbare Adresse gefunden.";
-
-  const cc = [];
-  if (ds && ds !== an) cc.push(ds);
-  const abm = EINSTELLUNGEN.abmeldeAdresseInCc ? abmeldeAdresse(k["list-unsubscribe"]) : "";
-  if (abm && abm !== an && abm !== ds) cc.push(abm);
-
-  const name = EINSTELLUNGEN.meinName || Office.context.mailbox.userProfile.displayName;
-  Office.context.mailbox.displayNewMessageForm({
-    toRecipients: [an],
-    ccRecipients: cc,
-    subject: frueher
-      ? "Erneuter Widerspruch und letzte Aufforderung zur Unterlassung von Werbe-E-Mails"
-      : "Widerspruch gegen Werbe-E-Mails und Aufforderung zur Unterlassung",
-    htmlBody: brieftext(item, meine, frueher, name),
-  });
-
-  await protokollSchreiben(absender);
-  await kategorieSetzen(item);
-  return "";
+  // Aufräumen: Regel für künftige Mails, Posteingang leeren, diese Mail zuletzt verschieben
+  let ordnerId;
+  try {
+    ordnerId = await zielOrdnerId();
+  } catch (e) {
+    return { text: teile[0] + ". Aufräumen ist für dieses Postfach nicht freigegeben." };
+  }
+  if (EINSTELLUNGEN.regelAnlegen && await regelAnlegen(absender, ordnerId)) teile.push("Regel angelegt");
+  if (EINSTELLUNGEN.aufraeumen) {
+    const diese = Office.context.mailbox.convertToRestId(item.itemId, Office.MailboxEnums.RestVersion.v2_0);
+    const n = await posteingangAufraeumen(absender, ordnerId, diese);
+    teile.push(`${n + 1} Mail(s) nach ${EINSTELLUNGEN.zielOrdner} verschoben`);
+    melden(teile.join(", ") + ".", false);
+    await graph("POST", `/me/messages/${diese}/move`, { destinationId: ordnerId });
+  }
+  return { text: teile.join(", ") + "." };
 }
 
 async function widerspruch(event) {
   try {
-    const grund = await pruefenUndErstellen();
-    if (grund) melden(grund, true);
-    else melden("Widerspruch als Entwurf geöffnet. Bitte prüfen und senden.", false);
+    const r = await ausfuehren();
+    if (r.fehler) melden(r.fehler, true);
+    else melden(r.text, false);
   } catch (e) {
     melden("Fehler: " + (e && e.message ? e.message : e), true);
   }
