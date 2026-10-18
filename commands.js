@@ -140,6 +140,64 @@ function brieftext(item, meineAdr, frueher, name) {
   return absaetze.map((a) => `<p>${a}</p>`).join("");
 }
 
+// ---------- Sprache ----------
+const WOERTER_DE = ["und", "der", "die", "das", "sie", "ihre", "ihr", "mit", "für", "nicht", "auf", "ist", "jetzt", "hier", "abmelden", "newsletter-abmeldung"];
+const WOERTER_EN = ["the", "and", "your", "you", "with", "for", "not", "this", "now", "here", "unsubscribe", "our", "is", "are"];
+
+// "de" oder "en": Content-Language-Kopf, sonst Wortzählung im Text, bei Gleichstand die Absenderdomain
+function sprache(k, text, absender) {
+  const cl = (k["content-language"] || "").toLowerCase();
+  if (cl.startsWith("de")) return "de";
+  if (cl.startsWith("en")) return "en";
+  const woerter = (text || "").replace(/<[^>]+>/g, " ").toLowerCase().match(/[a-zäöüß-]+/g) || [];
+  let de = 0, en = 0;
+  for (const w of woerter.slice(0, 3000)) {
+    if (WOERTER_DE.includes(w)) de++;
+    if (WOERTER_EN.includes(w)) en++;
+  }
+  if (de > en * 1.2) return "de";
+  if (en > de * 1.2) return "en";
+  return /\.(de|at|ch)$/.test(absender) ? "de" : "en";
+}
+
+function betreffText(lang, frueher) {
+  if (lang === "en") {
+    return frueher
+      ? "Renewed objection and final demand to cease sending advertising e-mails"
+      : "Objection to advertising e-mails and demand to cease and desist";
+  }
+  return frueher
+    ? "Erneuter Widerspruch und letzte Aufforderung zur Unterlassung von Werbe-E-Mails"
+    : "Widerspruch gegen Werbe-E-Mails und Aufforderung zur Unterlassung";
+}
+
+function brieftextEn(item, meineAdr, frueher, name) {
+  const d = (x) => x.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+  const absaetze = [];
+  absaetze.push(esc("Dear Sir or Madam,"));
+  absaetze.push(esc(`On ${d(item.dateTimeCreated)} you sent an advertising e-mail with the subject "${item.subject}" to my e-mail address ${meineAdr} (sender: ${item.from.emailAddress}).`));
+  if (frueher) {
+    absaetze.push(esc(`By e-mail of ${d(frueher)} I already informed you that I do not wish to receive any advertising from you and demanded that you stop. Sending me advertising again nevertheless is a deliberate violation that I will not tolerate any further.`));
+  }
+  absaetze.push(esc("I never subscribed to your newsletter and have at no time given my express consent to receiving advertising by e-mail. Sending it is unlawful under Art. 13 of the ePrivacy Directive 2002/58/EC and, under German law, constitutes an unreasonable nuisance within the meaning of Section 7(2) No. 2 of the German Act against Unfair Competition (UWG) and an unlawful interference with my general right of personality (Sections 823(1), 1004(1) German Civil Code). Insofar as you rely on an existing customer relationship, I hereby expressly object to any further use of my address."));
+  const punkte = [
+    "to refrain immediately from sending any advertising to me, regardless of which of my e-mail addresses;",
+    "to erase my personal data (Art. 17 GDPR). I object to the processing of my data for direct marketing purposes under Art. 21(2) GDPR; it may no longer be processed for such purposes (Art. 21(3) GDPR);",
+  ];
+  if (EINSTELLUNGEN.mitAuskunft) {
+    punkte.push("to inform me under Art. 15 GDPR which personal data you hold about me, where you obtained my address and to whom you have disclosed it. If you rely on consent, please provide proof of it (Art. 7(1) GDPR);");
+  }
+  punkte.push("to confirm in writing within 14 days that you have complied.");
+  absaetze.push("I therefore request you<br>" + punkte.map((p, i) => `${i + 1}. ${esc(p)}`).join("<br>"));
+  if (frueher) {
+    absaetze.push(esc("Should I not receive confirmation within this period, or should I receive further advertising from you, I will instruct a lawyer to issue a formal warning (Abmahnung) without further notice and file a complaint with the competent data protection supervisory authority. You will bear the costs."));
+  } else {
+    absaetze.push(esc("In the event of any further unsolicited e-mails I expressly reserve the right to take legal action, in particular a formal warning with costs and a complaint to the competent data protection supervisory authority."));
+  }
+  absaetze.push("Yours faithfully,<br>" + esc(name));
+  return absaetze.map((a) => `<p>${a}</p>`).join("");
+}
+
 // ---------- Protokoll (wandert mit dem Postfach, auch auf andere Geräte) ----------
 function protokollLesen() {
   return Office.context.roamingSettings.get("protokoll") || {};
@@ -294,10 +352,9 @@ async function ausfuehren() {
     if (abm && abm !== an && abm !== ds) cc.push(abm);
 
     const name = EINSTELLUNGEN.meinName || Office.context.mailbox.userProfile.displayName;
-    const betreff = frueher
-      ? "Erneuter Widerspruch und letzte Aufforderung zur Unterlassung von Werbe-E-Mails"
-      : "Widerspruch gegen Werbe-E-Mails und Aufforderung zur Unterlassung";
-    const html = brieftext(item, meine, frueher, name);
+    const lang = sprache(k, text, absender);
+    const betreff = betreffText(lang, frueher);
+    const html = lang === "en" ? brieftextEn(item, meine, frueher, name) : brieftext(item, meine, frueher, name);
 
     let gesendet = false;
     if (mitGraph && EINSTELLUNGEN.sofortSenden) {
@@ -312,7 +369,7 @@ async function ausfuehren() {
         saveToSentItems: true,
         });
         gesendet = true;
-        teile.push(`Widerspruch an ${an} gesendet`);
+        teile.push(`Widerspruch (${lang === "en" ? "englisch" : "deutsch"}) an ${an} gesendet`);
       } catch (e) {
         // z.B. Firmenpostfach ohne Zustimmung des Admins: dann wie bisher als Entwurf
         console.log("Graph nicht verfügbar:", e);
@@ -321,7 +378,7 @@ async function ausfuehren() {
     }
     if (!gesendet) {
       Office.context.mailbox.displayNewMessageForm({ toRecipients: [an], ccRecipients: cc, subject: betreff, htmlBody: html });
-      teile.push("Widerspruch als Entwurf geöffnet");
+      teile.push(`Widerspruch (${lang === "en" ? "englisch" : "deutsch"}) als Entwurf geöffnet`);
     }
     await protokollSchreiben(absender);
     await kategorieSetzen(item);
