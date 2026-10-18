@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:mailappor="http://schemas.microsoft.com/office/mailappversionoverrides/1.0"
+           xsi:type="MailApp">
+  <Id>9394e48f-ebe3-4eda-9efd-20ecb6d9a2ce</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Thomas Woinar</ProviderName>
+  <DefaultLocale>de-DE</DefaultLocale>
+  <DisplayName DefaultValue="Werbe-Widerspruch"/>
+  <Description DefaultValue="Erzeugt einen Widerspruch mit Aufforderung zur Unterlassung gegen unbestellte Newsletter."/>
+  <IconUrl DefaultValue="https://twoinar.github.io/outlook-widerspruch/icon-64.png"/>
+  <HighResolutionIconUrl DefaultValue="https://twoinar.github.io/outlook-widerspruch/icon-128.png"/>
+  <SupportUrl DefaultValue="https://twoinar.github.io/outlook-widerspruch/"/>
+  <AppDomains>
+    <AppDomain>https://twoinar.github.io</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Mailbox"/>
+  </Hosts>
+  <Requirements>
+    <Sets>
+      <Set Name="Mailbox" MinVersion="1.8"/>
+    </Sets>
+  </Requirements>
+  <FormSettings>
+    <Form xsi:type="ItemRead">
+      <DesktopSettings>
+        <SourceLocation DefaultValue="https://twoinar.github.io/outlook-widerspruch/commands.html"/>
+        <RequestedHeight>250</RequestedHeight>
+      </DesktopSettings>
+    </Form>
+  </FormSettings>
+  <Permissions>ReadWriteMailbox</Permissions>
+  <Rule xsi:type="RuleCollection" Mode="Or">
+    <Rule xsi:type="ItemIs" ItemType="Message" FormType="Read"/>
+  </Rule>
+  <DisableEntityHighlighting>false</DisableEntityHighlighting>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/mailappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Requirements>
+      <bt:Sets DefaultMinVersion="1.8">
+        <bt:Set Name="Mailbox"/>
+      </bt:Sets>
+    </Requirements>
+    <Hosts>
+      <Host xsi:type="MailHost">
+        <DesktopFormFactor>
+          <FunctionFile resid="Commands.Url"/>
+          <ExtensionPoint xsi:type="MessageReadCommandSurface">
+            <OfficeTab id="TabDefault">
+              <Group id="widerspruchGruppe">
+                <Label resid="Gruppe.Label"/>
+                <Control xsi:type="Button" id="widerspruchButton">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ExecuteFunction">
+                    <FunctionName>widerspruch</FunctionName>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="https://twoinar.github.io/outlook-widerspruch/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="https://twoinar.github.io/outlook-widerspruch/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="https://twoinar.github.io/outlook-widerspruch/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Commands.Url" DefaultValue="https://twoinar.github.io/outlook-widerspruch/commands.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Gruppe.Label" DefaultValue="Werbung"/>
+        <bt:String id="Button.Label" DefaultValue="Widerspruch"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="Button.Tip" DefaultValue="Öffnet einen Widerspruch mit Aufforderung zur Unterlassung an den Absender dieser Werbemail."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>
